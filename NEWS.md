@@ -9,6 +9,8 @@ shiny 1.0.0.9000
 
 ### Minor new features and improvements
 
+* Added a `shiny:sessionInit` Javascript event, which is fired at the end of the initialize method of the Session object. This allows us to listen for this event when we want to get the value of things like `Shiny.user`. ([#1568](https://github.com/rstudio/shiny/pull/1568))
+
 * Exported `session$user` (if it exists) to the client-side; it's accessible in the Shiny object: `Shiny.user`. ([#1563](https://github.com/rstudio/shiny/pull/1563))
 
 * Added support for HTML5's `pushState` which allows for pseudo-navigation
