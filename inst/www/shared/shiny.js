@@ -1136,7 +1136,12 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 
     addMessageHandler('config', function (message) {
       this.config = { workerId: message.workerId, sessionId: message.sessionId };
+      // != is on purpose (instead of !==) because it checks for both null and undefined
+      // (see here: http://stackoverflow.com/a/21273362/6174455)
+      /*eslint-disable */
       if (message.user != null) exports.user = message.user;
+      /*eslint-enable */
+      $(document).trigger('shiny:sessionInit');
     });
 
     addMessageHandler('busy', function (message) {
