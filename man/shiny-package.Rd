@@ -2,13 +2,13 @@
 % Please edit documentation in R/shiny.R
 \docType{package}
 \name{shiny-package}
-\alias{shiny}
 \alias{shiny-package}
+\alias{shiny}
 \title{Web Application Framework for R}
 \description{
 Shiny makes it incredibly easy to build interactive web applications with R.
 Automatic "reactive" binding between inputs and outputs and extensive
-pre-built widgets make it possible to build beautiful, responsive, and
+prebuilt widgets make it possible to build beautiful, responsive, and
 powerful applications with minimal effort.
 }
 \details{
@@ -19,4 +19,3 @@ includes extensive annotated examples.
 \seealso{
 \link{shiny-options} for documentation about global options.
 }
-

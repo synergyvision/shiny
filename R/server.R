@@ -370,9 +370,9 @@ argsForServerFunc <- function(serverFunc, session) {
 }
 
 getEffectiveBody <- function(func) {
-  # Note: NULL values are OK. isS4(NULL) returns FALSE, body(NULL)
-  # returns NULL.
-  if (isS4(func) && class(func) == "functionWithTrace")
+  if (is.null(func))
+    NULL
+  else if (isS4(func) && class(func) == "functionWithTrace")
     body(func@original)
   else
     body(func)
@@ -561,7 +561,7 @@ runApp <- function(appDir=getwd(),
   }, add = TRUE)
 
   if (.globals$running) {
-    stop("Can't call `runApp()` from within `runApp()`. If your ,",
+    stop("Can't call `runApp()` from within `runApp()`. If your ",
          "application code contains `runApp()`, please remove it.")
   }
   .globals$running <- TRUE

@@ -56,6 +56,17 @@ function padZeros(n, digits) {
   return str;
 }
 
+// Round to a specified number of significant digits.
+function roundSignif(x, digits = 1) {
+  if (digits < 1)
+    throw "Significant digits must be at least 1.";
+
+  // This converts to a string and back to a number, which is inelegant, but
+  // is less prone to FP rounding error than an alternate method which used
+  // Math.round().
+  return parseFloat(x.toPrecision(digits));
+}
+
 // Take a string with format "YYYY-MM-DD" and return a Date object.
 // IE8 and QTWebKit don't support YYYY-MM-DD, but they support YYYY/MM/DD
 function parseDate(dateString) {
@@ -150,7 +161,24 @@ function pixelRatio() {
 // "with" on the argument value, and return the result.
 function scopeExprToFunc(expr) {
   /*jshint evil: true */
-  var func = new Function("with (this) {return (" + expr + ");}");
+  var expr_escaped = expr.replace(/[\\"']/g, '\\$&').replace(/\u0000/g, '\\0');
+  try {
+    var func = new Function(
+      `with (this) {
+        try {
+          return (${expr});
+        } catch (e) {
+          console.error('Error evaluating expression: ${expr_escaped}');
+          throw e;
+        }
+      }`
+    );
+  } catch (e) {
+    console.error("Error parsing expression: " + expr);
+    throw e;
+  }
+
+
   return function(scope) {
     return func.call(scope);
   };

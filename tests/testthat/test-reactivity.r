@@ -1,6 +1,77 @@
 context("reactivity")
 
 
+test_that("ReactiveVal", {
+  val <- reactiveVal()
+
+  isolate({
+    expect_true(is.null(val()))
+
+    # Set to a simple value
+    val(1)
+    expect_equal(val(), 1)
+
+    # Set to a complex value
+    val(cars)
+    expect_equal(val(), cars)
+
+    # Check that passing in an initial value works
+    expect_equal(reactiveVal(10)(), 10)
+  })
+
+  o <- observe({
+    val()
+  })
+  flushReact()
+  expect_equal(execCount(o), 1)
+  # Just making sure o is stable
+  flushReact()
+  expect_equal(execCount(o), 1)
+
+  # Changing value causes o to invalidate
+  val(10)
+  flushReact()
+  expect_equal(execCount(o), 2)
+
+  # Setting new value that's same as current value is a no-op
+  val(10)
+  flushReact()
+  expect_equal(execCount(o), 2)  #
+
+  o$destroy()
+})
+
+test_that("ReactiveVals have independent dependencies", {
+  # Issue 1710
+  x <- reactiveVal(0)
+  y <- reactiveVal(0)
+
+  o <- observe({
+    y()
+  })
+
+  # The observer always fires the first time
+  x(1)
+  flushReact()
+  expect_equal(execCount(o), 1)
+
+  # Changing x again shouldn't invalidate the observer
+  x(2)
+  flushReact()
+  expect_equal(execCount(o), 1)
+
+  o$destroy()
+})
+
+
+test_that("ReactiveVal labels", {
+  val <- reactiveVal()
+  expect_equal(attr(val, "label", exact = TRUE), "val")
+
+  name.with.dots = reactiveVal()
+  expect_equal(attr(name.with.dots, "label", exact = TRUE), "name.with.dots")
+})
+
 # Test for correct behavior of ReactiveValues
 test_that("ReactiveValues", {
   # Creation and indexing into ReactiveValues -------------------------------

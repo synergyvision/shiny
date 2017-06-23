@@ -2,6 +2,8 @@
 
 var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
 
+function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
+
 //---------------------------------------------------------------------
 // Source file: ../srcjs/_start.js
 
@@ -76,6 +78,18 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     while (str.length < digits) {
       str = "0" + str;
     }return str;
+  }
+
+  // Round to a specified number of significant digits.
+  function roundSignif(x) {
+    var digits = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : 1;
+
+    if (digits < 1) throw "Significant digits must be at least 1.";
+
+    // This converts to a string and back to a number, which is inelegant, but
+    // is less prone to FP rounding error than an alternate method which used
+    // Math.round().
+    return parseFloat(x.toPrecision(digits));
   }
 
   // Take a string with format "YYYY-MM-DD" and return a Date object.
@@ -163,7 +177,14 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
   // "with" on the argument value, and return the result.
   function scopeExprToFunc(expr) {
     /*jshint evil: true */
-    var func = new Function("with (this) {return (" + expr + ");}");
+    var expr_escaped = expr.replace(/[\\"']/g, '\\$&').replace(/\u0000/g, '\\0');
+    try {
+      var func = new Function('with (this) {\n        try {\n          return (' + expr + ');\n        } catch (e) {\n          console.error(\'Error evaluating expression: ' + expr_escaped + '\');\n          throw e;\n        }\n      }');
+    } catch (e) {
+      console.error("Error parsing expression: " + expr);
+      throw e;
+    }
+
     return function (scope) {
       return func.call(scope);
     };
@@ -614,7 +635,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 
   // Merge opts with defaults, and return a new object.
   function addDefaultInputOpts(opts) {
-    return Object.assign({
+    return $.extend({
       immediate: false,
       binding: null,
       el: null
@@ -992,6 +1013,33 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
       }
     };
 
+    // Narrows a scopeComponent -- an input or output object -- to one constrained
+    // by nsPrefix. Returns a new object with keys removed and renamed as
+    // necessary.
+    function narrowScopeComponent(scopeComponent, nsPrefix) {
+      return Object.keys(scopeComponent).filter(function (k) {
+        return k.indexOf(nsPrefix) === 0;
+      }).map(function (k) {
+        return _defineProperty({}, k.substring(nsPrefix.length), scopeComponent[k]);
+      }).reduce(function (obj, pair) {
+        return $.extend(obj, pair);
+      }, {});
+    }
+
+    // Narrows a scope -- an object with input and output "subComponents" -- to
+    // one constrained by the nsPrefix string.
+    //
+    // If nsPrefix is null or empty, returns scope without modification.
+    //
+    // Otherwise, returns a new object with keys in subComponents removed and
+    // renamed as necessary.
+    function narrowScope(scope, nsPrefix) {
+      return nsPrefix ? {
+        input: narrowScopeComponent(scope.input, nsPrefix),
+        output: narrowScopeComponent(scope.output, nsPrefix)
+      } : scope;
+    }
+
     this.$updateConditionals = function () {
       $(document).trigger({
         type: 'shiny:conditional'
@@ -1021,7 +1069,9 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
           el.data('data-display-if-func', condFunc);
         }
 
-        var show = condFunc(scope);
+        var nsPrefix = el.attr('data-ns-prefix');
+        var nsScope = narrowScope(scope, nsPrefix);
+        var show = condFunc(nsScope);
         var showing = el.css("display") !== "none";
         if (show !== showing) {
           if (show) {
@@ -1229,6 +1279,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     addMessageHandler('config', function (message) {
       this.config = { workerId: message.workerId, sessionId: message.sessionId };
       if (message.user) exports.user = message.user;
+      $(document).trigger('shiny:sessioninitialized');
     });
 
     addMessageHandler('busy', function (message) {
@@ -1336,8 +1387,13 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
       binding: function binding(message) {
         var key = message.id;
         var binding = this.$bindings[key];
-        if (binding && binding.showProgress) {
-          binding.showProgress(true);
+        if (binding) {
+          $(binding.el).trigger({
+            type: 'shiny:outputinvalidated',
+            binding: binding,
+            name: key
+          });
+          if (binding.showProgress) binding.showProgress(true);
         }
       },
 
@@ -1447,10 +1503,10 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     // Returns a URL which can be queried to get values from inside the server
     // function. This is enabled with `options(shiny.testmode=TRUE)`.
     this.getTestSnapshotBaseUrl = function () {
-      var _ref = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+      var _ref2 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
 
-      var _ref$fullUrl = _ref.fullUrl;
-      var fullUrl = _ref$fullUrl === undefined ? true : _ref$fullUrl;
+      var _ref2$fullUrl = _ref2.fullUrl;
+      var fullUrl = _ref2$fullUrl === undefined ? true : _ref2$fullUrl;
 
       var loc = window.location;
       var url = "";
@@ -1519,22 +1575,22 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     var fadeDuration = 250;
 
     function show() {
-      var _ref2 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+      var _ref3 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
 
-      var _ref2$html = _ref2.html;
-      var html = _ref2$html === undefined ? '' : _ref2$html;
-      var _ref2$action = _ref2.action;
-      var action = _ref2$action === undefined ? '' : _ref2$action;
-      var _ref2$deps = _ref2.deps;
-      var deps = _ref2$deps === undefined ? [] : _ref2$deps;
-      var _ref2$duration = _ref2.duration;
-      var duration = _ref2$duration === undefined ? 5000 : _ref2$duration;
-      var _ref2$id = _ref2.id;
-      var id = _ref2$id === undefined ? null : _ref2$id;
-      var _ref2$closeButton = _ref2.closeButton;
-      var closeButton = _ref2$closeButton === undefined ? true : _ref2$closeButton;
-      var _ref2$type = _ref2.type;
-      var type = _ref2$type === undefined ? null : _ref2$type;
+      var _ref3$html = _ref3.html;
+      var html = _ref3$html === undefined ? '' : _ref3$html;
+      var _ref3$action = _ref3.action;
+      var action = _ref3$action === undefined ? '' : _ref3$action;
+      var _ref3$deps = _ref3.deps;
+      var deps = _ref3$deps === undefined ? [] : _ref3$deps;
+      var _ref3$duration = _ref3.duration;
+      var duration = _ref3$duration === undefined ? 5000 : _ref3$duration;
+      var _ref3$id = _ref3.id;
+      var id = _ref3$id === undefined ? null : _ref3$id;
+      var _ref3$closeButton = _ref3.closeButton;
+      var closeButton = _ref3$closeButton === undefined ? true : _ref3$closeButton;
+      var _ref3$type = _ref3.type;
+      var type = _ref3$type === undefined ? null : _ref3$type;
 
       if (!id) id = randomId();
 
@@ -1678,12 +1734,12 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     // content is non-Bootstrap. Bootstrap modals require some special handling,
     // which is coded in here.
     show: function show() {
-      var _ref3 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+      var _ref4 = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
 
-      var _ref3$html = _ref3.html;
-      var html = _ref3$html === undefined ? '' : _ref3$html;
-      var _ref3$deps = _ref3.deps;
-      var deps = _ref3$deps === undefined ? [] : _ref3$deps;
+      var _ref4$html = _ref4.html;
+      var html = _ref4$html === undefined ? '' : _ref4$html;
+      var _ref4$deps = _ref4.deps;
+      var deps = _ref4$deps === undefined ? [] : _ref4$deps;
 
 
       // If there was an existing Bootstrap modal, then there will be a modal-
@@ -2971,6 +3027,11 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
       // For reversed scales, the min and max can be reversed, so use findBox
       // to ensure correct order.
       state.boundsData = coordmap.findBox(minData, maxData);
+      // Round to 14 significant digits to avoid spurious changes in FP values
+      // (#1634).
+      state.boundsData = mapValues(state.boundsData, function (val) {
+        return roundSignif(val, 14);
+      });
 
       // We also need to attach the data bounds and panel as data attributes, so
       // that if the image is re-sent, we can grab the data bounds to create a new
@@ -3256,8 +3317,6 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
     if (where === "replace") {
       exports.unbindAll(el);
     }
-
-    exports.unbindAll(el);
 
     var html;
     var dependencies = [];
@@ -3671,12 +3730,15 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
 
       if (data.hasOwnProperty('label')) $(el).parent().find('label[for="' + $escape(el.id) + '"]').text(data.label);
 
+      if (data.hasOwnProperty('placeholder')) el.placeholder = data.placeholder;
+
       $(el).trigger('change');
     },
     getState: function getState(el) {
       return {
         label: $(el).parent().find('label[for="' + $escape(el.id) + '"]').text(),
-        value: el.value
+        value: el.value,
+        placeholder: el.placeholder
       };
     },
     getRatePolicy: function getRatePolicy() {
@@ -4820,6 +4882,9 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
         // invalidated reactives, but observers don't actually execute.
         self.shinyapp.makeRequest('uploadieFinish', [], function () {}, function () {});
         $(self.iframe).remove();
+        // Reset the file input's value to "". This allows the same file to be
+        // uploaded again. https://stackoverflow.com/a/22521275
+        $(self.fileEl).val("");
       };
       if (this.iframe.attachEvent) {
         this.iframe.attachEvent('onload', iframeDestroy);
@@ -4935,6 +5000,9 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
         self.$setActive(false);
         self.onProgress(null, 1);
         self.$bar().text('Upload complete');
+        // Reset the file input's value to "". This allows the same file to be
+        // uploaded again. https://stackoverflow.com/a/22521275
+        $(evt.el).val("");
       }, function (error) {
         self.onError(error);
       });
@@ -4961,7 +5029,7 @@ var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol
       this.$container().css('visibility', visible ? 'visible' : 'hidden');
     };
     this.$setError = function (error) {
-      this.$bar().toggleClass('bar-danger', error !== null);
+      this.$bar().toggleClass('progress-bar-danger', error !== null);
       if (error !== null) {
         this.onProgress(null, 1);
         this.$bar().text(error);

@@ -5,7 +5,7 @@ NULL
 #'
 #' Shiny makes it incredibly easy to build interactive web applications with R.
 #' Automatic "reactive" binding between inputs and outputs and extensive
-#' pre-built widgets make it possible to build beautiful, responsive, and
+#' prebuilt widgets make it possible to build beautiful, responsive, and
 #' powerful applications with minimal effort.
 #'
 #' The Shiny tutorial at \url{http://shiny.rstudio.com/tutorial/} explains
@@ -375,12 +375,24 @@ NULL
 #' @seealso \url{http://shiny.rstudio.com/articles/modules.html}
 #' @export
 NS <- function(namespace, id = NULL) {
+  if (length(namespace) == 0)
+    ns_prefix <- character(0)
+  else
+    ns_prefix <- paste(namespace, collapse = ns.sep)
+
+  f <- function(id) {
+    if (length(id) == 0)
+      return(ns_prefix)
+    if (length(ns_prefix) == 0)
+      return(id)
+
+    paste(ns_prefix, id, sep = ns.sep)
+  }
+
   if (missing(id)) {
-    function(id) {
-      paste(c(namespace, id), collapse = ns.sep)
-    }
+    f
   } else {
-    paste(c(namespace, id), collapse = ns.sep)
+    f(id)
   }
 }
 
@@ -416,6 +428,7 @@ ShinySession <- R6Class(
     restoreCallbacks = 'Callbacks',
     restoredCallbacks = 'Callbacks',
     bookmarkExclude = character(0),  # Names of inputs to exclude from bookmarking
+    getBookmarkExcludeFuns = list(),
 
     testMode = FALSE,                # Are we running in test mode?
     testExportExprs = list(),
@@ -580,6 +593,16 @@ ShinySession <- R6Class(
       }) # withReactiveDomain
     },
 
+    # Modules (scopes) call this to register a function that returns a vector
+    # of names to exclude from bookmarking. The function should return
+    # something like c("scope1-x", "scope1-y"). This doesn't use a Callback
+    # object because the return values of the functions are needed, but
+    # Callback$invoke() discards return values.
+    registerBookmarkExclude = function(fun) {
+      len <- length(private$getBookmarkExcludeFuns) + 1
+      private$getBookmarkExcludeFuns[[len]] <- fun
+    },
+
     # Save output values and errors. This is only used for testing mode.
     storeOutputValues = function(values = NULL) {
       private$outputValues <- mergeVectors(private$outputValues, values)
@@ -634,6 +657,19 @@ ShinySession <- R6Class(
               isTRUE(attr(private$.outputs[[name]], "snapshotExclude", TRUE))
             }, logical(1))
             values$output <- values$output[!exclude_idx]
+
+            # Apply snapshotPreprocess functions for outputs that have them.
+            values$output <- lapply(
+              setNames(names(values$output), names(values$output)),
+              function(name) {
+                preprocess <- attr(private$.outputs[[name]], "snapshotPreprocess", TRUE)
+                if (is.function(preprocess)) {
+                  preprocess(values$output[[name]])
+                } else {
+                  values$output[[name]]
+                }
+              }
+            )
 
             values$output <- sortByName(values$output)
           }
@@ -833,7 +869,7 @@ ShinySession <- R6Class(
           if (anyUnnamed(dots))
             stop("exportTestValues: all arguments must be named.")
 
-          names(dots) <- vapply(names(dots), ns, character(1))
+          names(dots) <- ns(names(dots))
 
           do.call(
             .subset2(self, "exportTestValues"),
@@ -945,6 +981,12 @@ ShinySession <- R6Class(
         scopeState <- scopeRestoreState(state)
         # Invoke user callbacks
         restoredCallbacks$invoke(scopeState)
+      })
+
+      # Returns the excluded names with the scope's ns prefix on them.
+      private$registerBookmarkExclude(function() {
+        excluded <- scope$getBookmarkExclude()
+        ns(excluded)
       })
 
       scope
@@ -1163,6 +1205,13 @@ ShinySession <- R6Class(
       })
 
       if (!hasPendingUpdates()) {
+        # Normally, if there are no updates, simply return without sending
+        # anything to the client. But if we are in test mode, we still want to
+        # send a message with blank `values`, so that the client knows that
+        # any changed inputs have been received by the server and processed.
+        if (isTRUE(private$testMode)) {
+          private$sendMessage( values = list() )
+        }
         return(invisible())
       }
 
@@ -1278,8 +1327,12 @@ ShinySession <- R6Class(
       private$bookmarkExclude <- names
     },
     getBookmarkExclude = function() {
-      private$bookmarkExclude
+      scopedExcludes <- lapply(private$getBookmarkExcludeFuns, function(f) f())
+      scopedExcludes <- unlist(scopedExcludes)
+
+      c(private$bookmarkExclude, scopedExcludes)
     },
+
     onBookmark = function(fun) {
       if (!is.function(fun) || length(fun) != 1) {
         stop("`fun` must be a function that takes one argument")
@@ -1501,9 +1554,30 @@ ShinySession <- R6Class(
         }
       }
 
+      # @description Only applicable to files uploaded via IE. When possible,
+      #   adds the appropriate extension to temporary files created by
+      #   \code{mime::parse_multipart}.
+      # @param multipart A named list as returned by
+      #   \code{mime::parse_multipart}
+      # @return A named list with datapath updated to point to the new location
+      #   of the file, if an extension was added.
+      maybeMoveIEUpload <- function(multipart) {
+        if (is.null(multipart)) return(NULL)
+
+        lapply(multipart, function(input) {
+          oldPath <- input$datapath
+          newPath <- paste0(oldPath, maybeGetExtension(input$name))
+          if (oldPath != newPath) {
+            file.rename(oldPath, newPath)
+            input$datapath <- newPath
+          }
+          input
+        })
+      }
+
       if (matches[2] == 'uploadie' && identical(req$REQUEST_METHOD, "POST")) {
         id <- URLdecode(matches[3])
-        res <- mime::parse_multipart(req)
+        res <- maybeMoveIEUpload(mime::parse_multipart(req))
         private$.input$set(id, res[[id]])
         return(httpResponse(200, 'text/plain', 'OK'))
       }
@@ -1827,17 +1901,6 @@ outputOptions <- function(x, name, ...) {
 
   .subset2(x, 'impl')$outputOptions(name, ...)
 }
-
-
-#' Mark an output to be excluded from test snapshots
-#'
-#' @param x A reactive which will be assigned to an output.
-#'
-#' @export
-snapshotExclude <- function(x) {
-  markOutputAttrs(x, snapshotExclude = TRUE)
-}
-
 
 #' Add callbacks for Shiny session events
 #'
