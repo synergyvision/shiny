@@ -351,37 +351,71 @@ HandlerManager <- R6Class("HandlerManager",
         }
 
         response <- handler(req)
-        if (is.null(response))
-          response <- httpResponse(404, content="<h1>Not Found</h1>")
 
-        if (inherits(response, "httpResponse")) {
-          headers <- as.list(response$headers)
-          headers$'Content-Type' <- response$content_type
+        res <- hybrid_chain(response, function(response) {
+          if (is.null(response))
+            response <- httpResponse(404, content="<h1>Not Found</h1>")
 
-          response <- filter(req, response)
-          if (head_request) {
-            headers$`Content-Length` <- nchar(response$content, type = "bytes")
-            return(list(
-              status = response$status,
-              body = "",
-              headers = headers
-            ))
+          if (inherits(response, "httpResponse")) {
+            headers <- as.list(response$headers)
+            headers$'Content-Type' <- response$content_type
+
+            response <- filter(req, response)
+            if (head_request) {
+
+              headers$`Content-Length` <- getResponseContentLength(response, deleteOwnedContent = TRUE)
+
+              return(list(
+                status = response$status,
+                body = "",
+                headers = headers
+              ))
+            } else {
+              return(list(
+                status = response$status,
+                body = response$content,
+                headers = headers
+              ))
+            }
+
           } else {
-            return(list(
-              status = response$status,
-              body = response$content,
-              headers = headers
-            ))
+            # Assume it's a Rook-compatible response
+            return(response)
           }
-
-        } else {
-          # Assume it's a Rook-compatible response
-          return(response)
-        }
+        })
       }
     }
   )
 )
+
+# Safely get the Content-Length of a Rook response, or NULL if the length cannot
+# be determined for whatever reason (probably malformed response$content).
+# If deleteOwnedContent is TRUE, then the function should delete response
+# content that is of the form list(file=..., owned=TRUE).
+getResponseContentLength <- function(response, deleteOwnedContent) {
+  force(deleteOwnedContent)
+
+  result <- if (is.character(response$content) && length(response$content) == 1) {
+    nchar(response$content, type = "bytes")
+  } else if (is.raw(response$content)) {
+    length(response$content)
+  } else if (is.list(response$content) && !is.null(response$content$file)) {
+    if (deleteOwnedContent && isTRUE(response$content$owned)) {
+      on.exit(unlink(response$content$file, recursive = FALSE, force = FALSE), add = TRUE)
+    }
+    file.info(response$content$file)$size
+  } else {
+    warning("HEAD request for unexpected content class ", class(response$content)[[1]])
+    NULL
+  }
+
+  if (is.na(result)) {
+    # Mostly for missing file case
+    return(NULL)
+  } else {
+    return(result)
+  }
+}
 
 #
 # ## Next steps

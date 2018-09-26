@@ -349,7 +349,7 @@ RestoreContext <- R6Class("RestoreContext",
         mapply(names(vals), vals, SIMPLIFY = FALSE,
           FUN = function(name, value) {
             tryCatch(
-              jsonlite::fromJSON(value),
+              safeFromJSON(value),
               error = function(e) {
                 stop("Failed to parse URL parameter \"", name, "\"")
               }
@@ -448,14 +448,30 @@ withRestoreContext <- function(ctx, expr) {
 
 # Is there a current restore context?
 hasCurrentRestoreContext <- function() {
-  restoreCtxStack$size() > 0
+  if (restoreCtxStack$size() > 0)
+    return(TRUE)
+  domain <- getDefaultReactiveDomain()
+  if (!is.null(domain) && !is.null(domain$restoreContext))
+    return(TRUE)
+  
+  return(FALSE)
 }
 
-# Call to access the current restore context
+# Call to access the current restore context. First look on the restore
+# context stack, and if not found, then see if there's one on the current
+# reactive domain. In practice, the only time there will be a restore context
+# on the stack is when executing the UI function; when executing server code,
+# the restore context will be attached to the domain/session.
 getCurrentRestoreContext <- function() {
   ctx <- restoreCtxStack$peek()
   if (is.null(ctx)) {
-    stop("No restore context found")
+    domain <- getDefaultReactiveDomain()
+
+    if (is.null(domain) || is.null(domain$restoreContext)) {
+      stop("No restore context found")
+    }
+
+    ctx <- domain$restoreContext
   }
   ctx
 }

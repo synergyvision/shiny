@@ -4,8 +4,8 @@
 \alias{tabsetPanel}
 \title{Create a tabset panel}
 \usage{
-tabsetPanel(..., id = NULL, selected = NULL, type = c("tabs", "pills"),
-  position = NULL)
+tabsetPanel(..., id = NULL, selected = NULL, type = c("tabs",
+  "pills"), position = NULL)
 }
 \arguments{
 \item{...}{\code{\link{tabPanel}} elements to include in the tabset}
@@ -44,5 +44,6 @@ mainPanel(
 )
 }
 \seealso{
-\code{\link{tabPanel}}, \code{\link{updateTabsetPanel}}
+\code{\link{tabPanel}}, \code{\link{updateTabsetPanel}},
+  \code{\link{insertTab}}, \code{\link{showTab}}
 }

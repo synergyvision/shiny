@@ -142,13 +142,14 @@ registerInputHandler("shiny.matrix", function(data, ...) {
   return(m)
 })
 
+
 registerInputHandler("shiny.number", function(val, ...){
   ifelse(is.null(val), NA, val)
 })
 
 registerInputHandler("shiny.password", function(val, shinysession, name) {
   # Mark passwords as not serializable
-  .subset2(shinysession$input, "impl")$setMeta(name, "shiny.serializer", serializerUnserializable)
+  setSerializer(name, serializerUnserializable)
   val
 })
 
@@ -214,7 +215,27 @@ registerInputHandler("shiny.file", function(val, shinysession, name) {
   # Need to mark this input value with the correct serializer. When a file is
   # uploaded the usual way (instead of being restored), this occurs in
   # session$`@uploadEnd`.
-  .subset2(shinysession$input, "impl")$setMeta(name, "shiny.serializer", serializerFileInput)
+  setSerializer(name, serializerFileInput)
+
+  snapshotPreprocessInput(name, snapshotPreprocessorFileInput)
 
   val
+})
+
+
+# to be used with !!!answer
+registerInputHandler("shiny.symbolList", function(val, ...) {
+  if (is.null(val)) {
+    list()
+  } else {
+    lapply(val, as.symbol)
+  }
+})
+# to be used with !!answer
+registerInputHandler("shiny.symbol", function(val, ...) {
+  if (is.null(val) || identical(val, "")) {
+    NULL
+  } else {
+    as.symbol(val)
+  }
 })

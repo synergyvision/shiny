@@ -55,36 +55,19 @@ renderPlot <- function(expr, width='auto', height='auto', res=72, ...,
 
   args <- list(...)
 
-  if (is.function(width))
+  if (is.reactive(width))
+    widthWrapper <- width
+  else if (is.function(width))
     widthWrapper <- reactive({ width() })
   else
     widthWrapper <- function() { width }
 
-  if (is.function(height))
+  if (is.reactive(height))
+    heightWrapper <- height
+  else if (is.function(height))
     heightWrapper <- reactive({ height() })
   else
     heightWrapper <- function() { height }
-
-  # A modified version of print.ggplot which returns the built ggplot object
-  # as well as the gtable grob. This overrides the ggplot::print.ggplot
-  # method, but only within the context of renderPlot. The reason this needs
-  # to be a (pseudo) S3 method is so that, if an object has a class in
-  # addition to ggplot, and there's a print method for that class, that we
-  # won't override that method. https://github.com/rstudio/shiny/issues/841
-  print.ggplot <- function(x) {
-    grid::grid.newpage()
-
-    build <- ggplot2::ggplot_build(x)
-
-    gtable <- ggplot2::ggplot_gtable(build)
-    grid::grid.draw(gtable)
-
-    structure(list(
-      build = build,
-      gtable = gtable
-    ), class = "ggplot_build_gtable")
-  }
-
 
   getDims <- function() {
     width <- widthWrapper()
@@ -106,155 +89,59 @@ renderPlot <- function(expr, width='auto', height='auto', res=72, ...,
   session <- NULL
   outputName <- NULL
 
-  # This function is the one that's returned from renderPlot(), and gets
-  # wrapped in an observer when the output value is assigned. The expression
-  # passed to renderPlot() is actually run in plotObj(); this function can only
-  # replay a plot if the width/height changes.
-  renderFunc <- function(shinysession, name, ...) {
-    session <<- shinysession
-    outputName <<- name
+  # Calls drawPlot, invoking the user-provided `func` (which may or may not
+  # return a promise). The idea is that the (cached) return value from this
+  # reactive can be used for varying width/heights, as it includes the
+  # displaylist, which is resolution independent.
+  drawReactive <- reactive(label = "plotObj", {
+    hybrid_chain(
+      {
+        # If !execOnResize, don't invalidate when width/height changes.
+        dims <- if (execOnResize) getDims() else isolate(getDims())
+        pixelratio <- session$clientData$pixelratio %OR% 1
+        do.call("drawPlot", c(
+          list(
+            name = outputName,
+            session = session,
+            func = func,
+            width = dims$width,
+            height = dims$height,
+            pixelratio = pixelratio,
+            res = res
+          ), args))
+      },
+      catch = function(reason) {
+        # Non-isolating read. A common reason for errors in plotting is because
+        # the dimensions are too small. By taking a dependency on width/height,
+        # we can try again if the plot output element changes size.
+        getDims()
 
-    dims <- getDims()
-
-    if (is.null(dims$width) || is.null(dims$height) ||
-        dims$width <= 0 || dims$height <= 0) {
-      return(NULL)
-    }
-
-    # The reactive that runs the expr in renderPlot()
-    plotData <- plotObj()
-
-    img <- plotData$img
-
-    # If only the width/height have changed, simply replay the plot and make a
-    # new img.
-    if (dims$width != img$width || dims$height != img$height) {
-      pixelratio <- session$clientData$pixelratio %OR% 1
-
-      coordmap <- NULL
-      plotFunc <- function() {
-        ..stacktraceon..(grDevices::replayPlot(plotData$recordedPlot))
-
-        # Coordmap must be recalculated after replaying plot, because pixel
-        # dimensions will have changed.
-        if (inherits(plotData$plotResult, "ggplot_build_gtable")) {
-          coordmap <<- getGgplotCoordmap(plotData$plotResult, pixelratio, res)
-        } else {
-          coordmap <<- getPrevPlotCoordmap(dims$width, dims$height)
-        }
+        # Propagate the error
+        stop(reason)
       }
-      outfile <- ..stacktraceoff..(
-        plotPNG(plotFunc, width = dims$width*pixelratio, height = dims$height*pixelratio,
-                res = res*pixelratio)
-      )
-      on.exit(unlink(outfile))
-
-      img <- dropNulls(list(
-        src = session$fileUrl(name, outfile, contentType='image/png'),
-        width = dims$width,
-        height = dims$height,
-        coordmap = coordmap,
-        # Get coordmap error message if present
-        error = attr(coordmap, "error", exact = TRUE)
-      ))
-    }
-
-    img
-  }
-
-
-  plotObj <- reactive(label = "plotObj", {
-    if (execOnResize) {
-      dims <- getDims()
-    } else {
-      isolate({ dims <- getDims() })
-    }
-
-    if (is.null(dims$width) || is.null(dims$height) ||
-        dims$width <= 0 || dims$height <= 0) {
-      return(NULL)
-    }
-
-    # Resolution multiplier
-    pixelratio <- session$clientData$pixelratio %OR% 1
-
-    plotResult <- NULL
-    recordedPlot <- NULL
-    coordmap <- NULL
-    plotFunc <- function() {
-      success <-FALSE
-      tryCatch(
-        {
-          # This is necessary to enable displaylist recording
-          grDevices::dev.control(displaylist = "enable")
-
-          # Actually perform the plotting
-          result <- withVisible(func())
-          success <- TRUE
-        },
-        finally = {
-          if (!success) {
-            # If there was an error in making the plot, there's a good chance
-            # it's "Error in plot.new: figure margins too large". We need to
-            # take a reactive dependency on the width and height, so that the
-            # user's plotting code will re-execute when the plot is resized,
-            # instead of just replaying the previous plot (which errored).
-            getDims()
-          }
-        }
-      )
-
-      if (result$visible) {
-        # Use capture.output to squelch printing to the actual console; we
-        # are only interested in plot output
-        utils::capture.output({
-          # This ..stacktraceon.. negates the ..stacktraceoff.. that wraps
-          # the call to plotFunc. The value needs to be printed just in case
-          # it's an object that requires printing to generate plot output,
-          # similar to ggplot2. But for base graphics, it would already have
-          # been rendered when func was called above, and the print should
-          # have no effect.
-          plotResult <<- ..stacktraceon..(print(result$value))
-        })
-      }
-
-      recordedPlot <<- grDevices::recordPlot()
-
-      if (inherits(plotResult, "ggplot_build_gtable")) {
-        coordmap <<- getGgplotCoordmap(plotResult, pixelratio, res)
-      } else {
-        coordmap <<- getPrevPlotCoordmap(dims$width, dims$height)
-      }
-    }
-
-    # This ..stacktraceoff.. is matched by the `func` function's
-    # wrapFunctionLabel(..stacktraceon=TRUE) call near the beginning of
-    # renderPlot, and by the ..stacktraceon.. in plotFunc where ggplot objects
-    # are printed
-    outfile <- ..stacktraceoff..(
-      do.call(plotPNG, c(plotFunc, width=dims$width*pixelratio,
-        height=dims$height*pixelratio, res=res*pixelratio, args))
-    )
-    on.exit(unlink(outfile))
-
-    list(
-      # img is the content that gets sent to the client.
-      img = dropNulls(list(
-        src = session$fileUrl(outputName, outfile, contentType='image/png'),
-        width = dims$width,
-        height = dims$height,
-        coordmap = coordmap,
-        # Get coordmap error message if present.
-        error = attr(coordmap, "error", exact = TRUE)
-      )),
-      # Returned value from expression in renderPlot() -- may be a printable
-      # object like ggplot2. Needed just in case we replayPlot and need to get
-      # a coordmap again.
-      plotResult = plotResult,
-      recordedPlot = recordedPlot
     )
   })
 
+  # This function is the one that's returned from renderPlot(), and gets
+  # wrapped in an observer when the output value is assigned.
+  renderFunc <- function(shinysession, name, ...) {
+    outputName <<- name
+    session <<- shinysession
+
+    hybrid_chain(
+      drawReactive(),
+      function(result) {
+        dims <- getDims()
+        pixelratio <- session$clientData$pixelratio %OR% 1
+        result <- do.call("resizeSavedPlot", c(
+          list(name, shinysession, result, dims$width, dims$height, pixelratio, res),
+          args
+        ))
+
+        result$img
+      }
+    )
+  }
 
   # If renderPlot isn't going to adapt to the height of the div, then the
   # div needs to adapt to the height of renderPlot. By default, plotOutput
@@ -266,26 +153,157 @@ renderPlot <- function(expr, width='auto', height='auto', res=72, ...,
   markRenderFunction(outputFunc, renderFunc, outputArgs = outputArgs)
 }
 
+resizeSavedPlot <- function(name, session, result, width, height, pixelratio, res, ...) {
+  if (result$img$width == width && result$img$height == height &&
+      result$pixelratio == pixelratio && result$res == res) {
+    return(result)
+  }
+
+  coordmap <- NULL
+  outfile <- plotPNG(function() {
+    grDevices::replayPlot(result$recordedPlot)
+    coordmap <<- getCoordmap(result$plotResult, width*pixelratio, height*pixelratio, res*pixelratio)
+  }, width = width*pixelratio, height = height*pixelratio, res = res*pixelratio, ...)
+  on.exit(unlink(outfile), add = TRUE)
+
+  result$img <- list(
+    src = session$fileUrl(name, outfile, contentType = "image/png"),
+    width = width,
+    height = height,
+    coordmap = coordmap,
+    error = attr(coordmap, "error", exact = TRUE)
+  )
+
+  result
+}
+
+drawPlot <- function(name, session, func, width, height, pixelratio, res, ...) {
+  #  1. Start PNG
+  #  2. Enable displaylist recording
+  #  3. Call user-defined func
+  #  4. Print/save result, if visible
+  #  5. Snapshot displaylist
+  #  6. Form coordmap
+  #  7. End PNG (in finally)
+  #  8. Form img tag
+  #  9. Return img, value, displaylist, coordmap
+  # 10. On error, take width and height dependency
+
+  outfile <- tempfile(fileext='.png') # If startPNG throws, this could leak. Shrug.
+  device <- startPNG(outfile, width*pixelratio, height*pixelratio, res = res*pixelratio, ...)
+  domain <- createGraphicsDevicePromiseDomain(device)
+  grDevices::dev.control(displaylist = "enable")
+
+  hybrid_chain(
+    hybrid_chain(
+      promises::with_promise_domain(domain, {
+        hybrid_chain(
+          func(),
+          function(value, .visible) {
+            if (.visible) {
+              # A modified version of print.ggplot which returns the built ggplot object
+              # as well as the gtable grob. This overrides the ggplot::print.ggplot
+              # method, but only within the context of renderPlot. The reason this needs
+              # to be a (pseudo) S3 method is so that, if an object has a class in
+              # addition to ggplot, and there's a print method for that class, that we
+              # won't override that method. https://github.com/rstudio/shiny/issues/841
+              print.ggplot <- custom_print.ggplot
+
+              # Use capture.output to squelch printing to the actual console; we
+              # are only interested in plot output
+              utils::capture.output({
+                # This ..stacktraceon.. negates the ..stacktraceoff.. that wraps
+                # the call to plotFunc. The value needs to be printed just in case
+                # it's an object that requires printing to generate plot output,
+                # similar to ggplot2. But for base graphics, it would already have
+                # been rendered when func was called above, and the print should
+                # have no effect.
+                result <- ..stacktraceon..(print(value))
+                # TODO jcheng 2017-04-11: Verify above ..stacktraceon..
+              })
+              result
+            } else {
+              # Not necessary, but I wanted to make it explicit
+              NULL
+            }
+          },
+          function(value) {
+            list(
+              plotResult = value,
+              recordedPlot = grDevices::recordPlot(),
+              coordmap = getCoordmap(value, width*pixelratio, height*pixelratio, res*pixelratio),
+              pixelratio = pixelratio,
+              res = res
+            )
+          }
+        )
+      }),
+      finally = function() {
+        grDevices::dev.off(device)
+      }
+    ),
+    function(result) {
+      result$img <- dropNulls(list(
+        src = session$fileUrl(name, outfile, contentType='image/png'),
+        width = width,
+        height = height,
+        coordmap = result$coordmap,
+        # Get coordmap error message if present
+        error = attr(result$coordmap, "error", exact = TRUE)
+      ))
+
+      result
+    },
+    finally = function() {
+      unlink(outfile)
+    }
+  )
+}
+
+# A modified version of print.ggplot which returns the built ggplot object
+# as well as the gtable grob. This overrides the ggplot::print.ggplot
+# method, but only within the context of renderPlot. The reason this needs
+# to be a (pseudo) S3 method is so that, if an object has a class in
+# addition to ggplot, and there's a print method for that class, that we
+# won't override that method. https://github.com/rstudio/shiny/issues/841
+custom_print.ggplot <- function(x) {
+  grid::grid.newpage()
+
+  build <- ggplot2::ggplot_build(x)
+
+  gtable <- ggplot2::ggplot_gtable(build)
+  grid::grid.draw(gtable)
+
+  structure(list(
+    build = build,
+    gtable = gtable
+  ), class = "ggplot_build_gtable")
+}
+
 # The coordmap extraction functions below return something like the examples
 # below. For base graphics:
 # plot(mtcars$wt, mtcars$mpg)
 # str(getPrevPlotCoordmap(400, 300))
-# List of 1
-#  $ :List of 4
-#   ..$ domain :List of 4
-#   .. ..$ left  : num 1.36
-#   .. ..$ right : num 5.58
-#   .. ..$ bottom: num 9.46
-#   .. ..$ top   : num 34.8
-#   ..$ range  :List of 4
-#   .. ..$ left  : num 50.4
-#   .. ..$ right : num 373
-#   .. ..$ bottom: num 199
-#   .. ..$ top   : num 79.6
-#   ..$ log    :List of 2
-#   .. ..$ x: NULL
-#   .. ..$ y: NULL
-#   ..$ mapping: Named list()
+# List of 2
+#  $ panels:List of 1
+#   ..$ :List of 4
+#   .. ..$ domain :List of 4
+#   .. .. ..$ left  : num 1.36
+#   .. .. ..$ right : num 5.58
+#   .. .. ..$ bottom: num 9.46
+#   .. .. ..$ top   : num 34.8
+#   .. ..$ range  :List of 4
+#   .. .. ..$ left  : num 65.6
+#   .. .. ..$ right : num 366
+#   .. .. ..$ bottom: num 238
+#   .. .. ..$ top   : num 48.2
+#   .. ..$ log    :List of 2
+#   .. .. ..$ x: NULL
+#   .. .. ..$ y: NULL
+#   .. ..$ mapping: Named list()
+#  $ dims  :List of 2
+#   ..$ width : num 400
+#   ..$ height: num 300
 #
 # For ggplot2, first you need to define the print.ggplot function from inside
 # renderPlot, then use it to print the plot:
@@ -304,29 +322,33 @@ renderPlot <- function(expr, width='auto', height='auto', res=72, ...,
 # }
 #
 # p <- print(ggplot(mtcars, aes(wt, mpg)) + geom_point())
-# str(getGgplotCoordmap(p, 1, 72))
-# List of 1
-#  $ :List of 10
-#   ..$ panel     : int 1
-#   ..$ row       : int 1
-#   ..$ col       : int 1
-#   ..$ panel_vars: Named list()
-#   ..$ log       :List of 2
-#   .. ..$ x: NULL
-#   .. ..$ y: NULL
-#   ..$ domain    :List of 4
-#   .. ..$ left  : num 1.32
-#   .. ..$ right : num 5.62
-#   .. ..$ bottom: num 9.22
-#   .. ..$ top   : num 35.1
-#   ..$ mapping   :List of 2
-#   .. ..$ x: chr "wt"
-#   .. ..$ y: chr "mpg"
-#   ..$ range     :List of 4
-#   .. ..$ left  : num 40.8
-#   .. ..$ right : num 446
-#   .. ..$ bottom: num 263
-#   .. ..$ top   : num 14.4
+# str(getGgplotCoordmap(p, 400, 300, 72))
+# List of 2
+#  $ panels:List of 1
+#   ..$ :List of 8
+#   .. ..$ panel     : num 1
+#   .. ..$ row       : num 1
+#   .. ..$ col       : num 1
+#   .. ..$ panel_vars: Named list()
+#   .. ..$ log       :List of 2
+#   .. .. ..$ x: NULL
+#   .. .. ..$ y: NULL
+#   .. ..$ domain    :List of 4
+#   .. .. ..$ left  : num 1.32
+#   .. .. ..$ right : num 5.62
+#   .. .. ..$ bottom: num 9.22
+#   .. .. ..$ top   : num 35.1
+#   .. ..$ mapping   :List of 2
+#   .. .. ..$ x: chr "wt"
+#   .. .. ..$ y: chr "mpg"
+#   .. ..$ range     :List of 4
+#   .. .. ..$ left  : num 33.3
+#   .. .. ..$ right : num 355
+#   .. .. ..$ bottom: num 328
+#   .. .. ..$ top   : num 5.48
+#  $ dims  :List of 2
+#   ..$ width : num 400
+#   ..$ height: num 300
 #
 # With a faceted ggplot2 plot, the outer list contains two objects, each of
 # which represents one panel. In this example, there is one panelvar, but there
@@ -334,55 +356,67 @@ renderPlot <- function(expr, width='auto', height='auto', res=72, ...,
 # mtc <- mtcars
 # mtc$am <- factor(mtc$am)
 # p <- print(ggplot(mtc, aes(wt, mpg)) + geom_point() + facet_wrap(~ am))
-# str(getGgplotCoordmap(p, 1, 72))
+# str(getGgplotCoordmap(p, 400, 300, 72))
 # List of 2
-#  $ :List of 10
-#   ..$ panel     : int 1
-#   ..$ row       : int 1
-#   ..$ col       : int 1
-#   ..$ panel_vars:List of 1
-#   .. ..$ panelvar1: Factor w/ 2 levels "0","1": 1
-#   ..$ log       :List of 2
-#   .. ..$ x: NULL
-#   .. ..$ y: NULL
-#   ..$ domain    :List of 4
-#   .. ..$ left  : num 1.32
-#   .. ..$ right : num 5.62
-#   .. ..$ bottom: num 9.22
-#   .. ..$ top   : num 35.1
-#   ..$ mapping   :List of 3
-#   .. ..$ x        : chr "wt"
-#   .. ..$ y        : chr "mpg"
-#   .. ..$ panelvar1: chr "am"
-#   ..$ range     :List of 4
-#   .. ..$ left  : num 45.6
-#   .. ..$ right : num 317
-#   .. ..$ bottom: num 251
-#   .. ..$ top   : num 35.7
-#  $ :List of 10
-#   ..$ panel     : int 2
-#   ..$ row       : int 1
-#   ..$ col       : int 2
-#   ..$ panel_vars:List of 1
-#   .. ..$ panelvar1: Factor w/ 2 levels "0","1": 2
-#   ..$ log       :List of 2
-#   .. ..$ x: NULL
-#   .. ..$ y: NULL
-#   ..$ domain    :List of 4
-#   .. ..$ left  : num 1.32
-#   .. ..$ right : num 5.62
-#   .. ..$ bottom: num 9.22
-#   .. ..$ top   : num 35.1
-#   ..$ mapping   :List of 3
-#   .. ..$ x        : chr "wt"
-#   .. ..$ y        : chr "mpg"
-#   .. ..$ panelvar1: chr "am"
-#   ..$ range     :List of 4
-#   .. ..$ left  : num 322
-#   .. ..$ right : num 594
-#   .. ..$ bottom: num 251
-#   .. ..$ top   : num 35.7
+#  $ panels:List of 2
+#   ..$ :List of 8
+#   .. ..$ panel     : num 1
+#   .. ..$ row       : int 1
+#   .. ..$ col       : int 1
+#   .. ..$ panel_vars:List of 1
+#   .. .. ..$ panelvar1: Factor w/ 2 levels "0","1": 1
+#   .. ..$ log       :List of 2
+#   .. .. ..$ x: NULL
+#   .. .. ..$ y: NULL
+#   .. ..$ domain    :List of 4
+#   .. .. ..$ left  : num 1.32
+#   .. .. ..$ right : num 5.62
+#   .. .. ..$ bottom: num 9.22
+#   .. .. ..$ top   : num 35.1
+#   .. ..$ mapping   :List of 3
+#   .. .. ..$ x        : chr "wt"
+#   .. .. ..$ y        : chr "mpg"
+#   .. .. ..$ panelvar1: chr "am"
+#   .. ..$ range     :List of 4
+#   .. .. ..$ left  : num 33.3
+#   .. .. ..$ right : num 191
+#   .. .. ..$ bottom: num 328
+#   .. .. ..$ top   : num 23.1
+#   ..$ :List of 8
+#   .. ..$ panel     : num 2
+#   .. ..$ row       : int 1
+#   .. ..$ col       : int 2
+#   .. ..$ panel_vars:List of 1
+#   .. .. ..$ panelvar1: Factor w/ 2 levels "0","1": 2
+#   .. ..$ log       :List of 2
+#   .. .. ..$ x: NULL
+#   .. .. ..$ y: NULL
+#   .. ..$ domain    :List of 4
+#   .. .. ..$ left  : num 1.32
+#   .. .. ..$ right : num 5.62
+#   .. .. ..$ bottom: num 9.22
+#   .. .. ..$ top   : num 35.1
+#   .. ..$ mapping   :List of 3
+#   .. .. ..$ x        : chr "wt"
+#   .. .. ..$ y        : chr "mpg"
+#   .. .. ..$ panelvar1: chr "am"
+#   .. ..$ range     :List of 4
+#   .. .. ..$ left  : num 197
+#   .. .. ..$ right : num 355
+#   .. .. ..$ bottom: num 328
+#   .. .. ..$ top   : num 23.1
+#  $ dims  :List of 2
+#   ..$ width : num 400
+#   ..$ height: num 300
 
+
+getCoordmap <- function(x, width, height, res) {
+  if (inherits(x, "ggplot_build_gtable")) {
+    getGgplotCoordmap(x, width, height, res)
+  } else {
+    getPrevPlotCoordmap(width, height)
+  }
+}
 
 # Get a coordmap for the previous plot made with base graphics.
 # Requires width and height of output image, in pixels.
@@ -398,7 +432,7 @@ getPrevPlotCoordmap <- function(width, height) {
   }
 
   # Wrapped in double list because other types of plots can have multiple panels.
-  list(list(
+  panel_info <- list(list(
     # Bounds of the plot area, in data space
     domain = list(
       left = usrCoords[1],
@@ -408,10 +442,10 @@ getPrevPlotCoordmap <- function(width, height) {
     ),
     # The bounds of the plot area, in DOM pixels
     range = list(
-      left = graphics::grconvertX(usrBounds[1], 'user', 'nfc') * width,
-      right = graphics::grconvertX(usrBounds[2], 'user', 'nfc') * width,
-      bottom = (1-graphics::grconvertY(usrBounds[3], 'user', 'nfc')) * height - 1,
-      top = (1-graphics::grconvertY(usrBounds[4], 'user', 'nfc')) * height - 1
+      left = graphics::grconvertX(usrBounds[1], 'user', 'ndc') * width,
+      right = graphics::grconvertX(usrBounds[2], 'user', 'ndc') * width,
+      bottom = (1-graphics::grconvertY(usrBounds[3], 'user', 'ndc')) * height - 1,
+      top = (1-graphics::grconvertY(usrBounds[4], 'user', 'ndc')) * height - 1
     ),
     log = list(
       x = if (graphics::par('xlog')) 10 else NULL,
@@ -422,28 +456,43 @@ getPrevPlotCoordmap <- function(width, height) {
     # (not an array) in JSON.
     mapping = list(x = NULL)[0]
   ))
+
+  list(
+    panels = panel_info,
+    dims = list(
+      width = width,
+      height =height
+    )
+  )
 }
 
-
 # Given a ggplot_build_gtable object, return a coordmap for it.
-getGgplotCoordmap <- function(p, pixelratio, res) {
+getGgplotCoordmap <- function(p, width, height, res) {
   if (!inherits(p, "ggplot_build_gtable"))
     return(NULL)
 
   tryCatch({
     # Get info from built ggplot object
-    info <- find_panel_info(p$build)
+    panel_info <- find_panel_info(p$build)
 
     # Get ranges from gtable - it's possible for this to return more elements than
     # info, because it calculates positions even for panels that aren't present.
     # This can happen with facet_wrap.
-    ranges <- find_panel_ranges(p$gtable, pixelratio, res)
+    ranges <- find_panel_ranges(p$gtable, res)
 
-    for (i in seq_along(info)) {
-      info[[i]]$range <- ranges[[i]]
+    for (i in seq_along(panel_info)) {
+      panel_info[[i]]$range <- ranges[[i]]
     }
 
-    return(info)
+    return(
+      list(
+        panels = panel_info,
+        dims = list(
+          width = width,
+          height = height
+        )
+      )
+    )
 
   }, error = function(e) {
     # If there was an error extracting info from the ggplot object, just return
@@ -470,13 +519,11 @@ find_panel_info <- function(b) {
 # This is for ggplot2>2.2.1, after an API was introduced for extracting
 # information about the plot object.
 find_panel_info_api <- function(b) {
-  # Workaround for check NOTE, until ggplot2 >2.2.1 is released
-  colon_colon <- `::`
   # Given a built ggplot object, return x and y domains (data space coords) for
   # each panel.
-  layout <- colon_colon("ggplot2", "summarise_layout")(b)
-  coord  <- colon_colon("ggplot2", "summarise_coord")(b)
-  layers <- colon_colon("ggplot2", "summarise_layers")(b)
+  layout <- ggplot2::summarise_layout(b)
+  coord  <- ggplot2::summarise_coord(b)
+  layers <- ggplot2::summarise_layers(b)
 
   # Given x and y scale objects and a coord object, return a list that has
   # the bases of log transformations for x and y, or NULL if it's not a
@@ -539,9 +586,11 @@ find_panel_info_api <- function(b) {
     # ggplot object. The original uses quoted expressions; convert to
     # character.
     mapping <- layers$mapping[[1]]
-    # lapply'ing as.character results in unexpected behavior for expressions
-    # like `wt/2`; deparse handles it correctly.
-    mapping <- lapply(mapping, deparse)
+    # In ggplot2 <=2.2.1, the mappings are expressions. In later versions, they
+    # are quosures. `deparse(quo_squash(x))` will handle both cases.
+    # as.character results in unexpected behavior for expressions like `wt/2`,
+    # which is why we use deparse.
+    mapping <- lapply(mapping, function(x) deparse(rlang::quo_squash(x)))
 
     # If either x or y is not present, give it a NULL entry.
     mapping <- mergeVectors(list(x = NULL, y = NULL), mapping)
@@ -723,8 +772,9 @@ find_panel_info_non_api <- function(b, ggplot_format) {
       mappings <- c(list(mappings), layer_mappings)
       mappings <- Reduce(x = mappings, init = list(x = NULL, y = NULL),
         function(init, m) {
-          if (is.null(init$x) && !is.null(m$x)) init$x <- m$x
-          if (is.null(init$y) && !is.null(m$y)) init$y <- m$y
+          # Can't use m$x/m$y; you get a partial match with xintercept/yintercept
+          if (is.null(init[["x"]]) && !is.null(m[["x"]])) init$x <- m[["x"]]
+          if (is.null(init[["y"]]) && !is.null(m[["y"]])) init$y <- m[["y"]]
           init
         }
       )
@@ -803,7 +853,7 @@ find_panel_info_non_api <- function(b, ggplot_format) {
 
 
 # Given a gtable object, return the x and y ranges (in pixel dimensions)
-find_panel_ranges <- function(g, pixelratio, res) {
+find_panel_ranges <- function(g, res) {
   # Given a vector of unit objects, return logical vector indicating which ones
   # are "null" units. These units use the remaining available width/height --
   # that is, the space not occupied by elements that have an absolute size.
@@ -933,26 +983,15 @@ find_panel_ranges <- function(g, pixelratio, res) {
   layout <- layout[order(layout$t, layout$l), ]
   layout$panel <- seq_len(nrow(layout))
 
-  # When using a HiDPI client on a Linux server, the pixel
-  # dimensions are doubled, so we have to divide the dimensions by
-  # `pixelratio`. When a HiDPI client is used on a Mac server (with
-  # the quartz device), the pixel dimensions _aren't_ doubled, even though
-  # the image has double size. In the latter case we don't have to scale the
-  # numbers down.
-  pix_ratio <- 1
-  if (!grepl("^quartz", names(grDevices::dev.cur()))) {
-    pix_ratio <- pixelratio
-  }
-
   # Return list of lists, where each inner list has left, right, top, bottom
   # values for a panel
   lapply(seq_len(nrow(layout)), function(i) {
     p <- layout[i, , drop = FALSE]
     list(
-      left   = x_pos[p$l - 1] / pix_ratio,
-      right  = x_pos[p$r] / pix_ratio,
-      bottom = y_pos[p$b] / pix_ratio,
-      top    = y_pos[p$t - 1] / pix_ratio
+      left   = x_pos[p$l - 1],
+      right  = x_pos[p$r],
+      bottom = y_pos[p$b],
+      top    = y_pos[p$t - 1]
     )
   })
 }

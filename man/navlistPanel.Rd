@@ -4,8 +4,8 @@
 \alias{navlistPanel}
 \title{Create a navigation list panel}
 \usage{
-navlistPanel(..., id = NULL, selected = NULL, well = TRUE, fluid = TRUE,
-  widths = c(4, 8))
+navlistPanel(..., id = NULL, selected = NULL, well = TRUE,
+  fluid = TRUE, widths = c(4, 8))
 }
 \arguments{
 \item{...}{\code{\link{tabPanel}} elements to include in the navlist}
@@ -53,5 +53,6 @@ fluidPage(
 )
 }
 \seealso{
-\code{\link{tabPanel}}, \code{\link{updateNavlistPanel}}
+\code{\link{tabPanel}}, \code{\link{updateNavlistPanel}},
+   \code{\link{insertTab}}, \code{\link{showTab}}
 }

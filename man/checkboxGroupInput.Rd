@@ -5,7 +5,8 @@
 \title{Checkbox Group Input Control}
 \usage{
 checkboxGroupInput(inputId, label, choices = NULL, selected = NULL,
-  inline = FALSE, width = NULL, choiceNames = NULL, choiceValues = NULL)
+  inline = FALSE, width = NULL, choiceNames = NULL,
+  choiceValues = NULL)
 }
 \arguments{
 \item{inputId}{The \code{input} slot that will be used to access the value.}
@@ -15,7 +16,8 @@ checkboxGroupInput(inputId, label, choices = NULL, selected = NULL,
 \item{choices}{List of values to show checkboxes for. If elements of the list
 are named then that name rather than the value is displayed to the user. If
 this argument is provided, then \code{choiceNames} and \code{choiceValues}
-must not be provided, and vice-versa.}
+must not be provided, and vice-versa. The values should be strings; other
+types (such as logicals and numbers) will be coerced to strings.}
 
 \item{selected}{The values that should be initially selected, if any.}
 
@@ -92,5 +94,7 @@ Other input elements: \code{\link{actionButton}},
   \code{\link{numericInput}}, \code{\link{passwordInput}},
   \code{\link{radioButtons}}, \code{\link{selectInput}},
   \code{\link{sliderInput}}, \code{\link{submitButton}},
-  \code{\link{textAreaInput}}, \code{\link{textInput}}
+  \code{\link{textAreaInput}}, \code{\link{textInput}},
+  \code{\link{varSelectInput}}
 }
+\concept{input elements}

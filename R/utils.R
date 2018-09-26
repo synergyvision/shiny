@@ -43,53 +43,43 @@ repeatable <- function(rngfunc, seed = stats::runif(1, 0, .Machine$integer.max))
   }
 }
 
-# Temporarily set x in env to value, evaluate expr, and
-# then restore x to its original state
-withTemporary <- function(env, x, value, expr, unset = FALSE) {
-
-  if (exists(x, envir = env, inherits = FALSE)) {
-    oldValue <- get(x, envir = env, inherits = FALSE)
-    on.exit(
-      assign(x, oldValue, envir = env, inherits = FALSE),
-      add = TRUE)
-  } else {
-    on.exit(
-      rm(list = x, envir = env, inherits = FALSE),
-      add = TRUE
-    )
-  }
-
-  if (!missing(value) && !isTRUE(unset))
-    assign(x, value, envir = env, inherits = FALSE)
-  else {
-    if (exists(x, envir = env, inherits = FALSE))
-      rm(list = x, envir = env, inherits = FALSE)
-  }
-  force(expr)
-}
-
 .globals$ownSeed <- NULL
 # Evaluate an expression using Shiny's own private stream of
 # randomness (not affected by set.seed).
 withPrivateSeed <- function(expr) {
-  withTemporary(.GlobalEnv, ".Random.seed",
-    .globals$ownSeed, unset=is.null(.globals$ownSeed), {
-      tryCatch({
-        expr
-      }, finally = {
-        .globals$ownSeed <- getExists('.Random.seed', 'numeric', globalenv())
-      })
-    }
-  )
-}
+  # Save the old seed if present.
+  if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+    hasOrigSeed <- TRUE
+    origSeed <- .GlobalEnv$.Random.seed
+  } else {
+    hasOrigSeed <- FALSE
+  }
 
-# a homemade version of set.seed(NULL) for backward compatibility with R 2.15.x
-reinitializeSeed <- if (getRversion() >= '3.0.0') {
-  function() set.seed(NULL)
-} else function() {
-  if (exists('.Random.seed', globalenv()))
-    rm(list = '.Random.seed', pos = globalenv())
-  stats::runif(1)  # generate any random numbers so R can reinitialize the seed
+  # Swap in the private seed.
+  if (is.null(.globals$ownSeed)) {
+    if (hasOrigSeed) {
+      # Move old seed out of the way if present.
+      rm(.Random.seed, envir = .GlobalEnv, inherits = FALSE)
+    }
+  } else {
+    .GlobalEnv$.Random.seed <- .globals$ownSeed
+  }
+
+  # On exit, save the modified private seed, and put the old seed back.
+  on.exit({
+    .globals$ownSeed <- .GlobalEnv$.Random.seed
+
+    if (hasOrigSeed) {
+      .GlobalEnv$.Random.seed <- origSeed
+    } else {
+      rm(.Random.seed, envir = .GlobalEnv, inherits = FALSE)
+    }
+    # Need to call this to make sure that the value of .Random.seed gets put
+    # into R's internal RNG state. (Issue #1763)
+    httpuv::getRNGState()
+  })
+
+  expr
 }
 
 # Version of runif that runs with private seed
@@ -225,7 +215,7 @@ sortByName <- function(x) {
 # R >=3.2.0, this wrapper is not necessary.
 list2env2 <- function(x, ...) {
   # Ensure that zero-length lists have a name attribute
-   if (length(x) == 0)
+  if (length(x) == 0)
     attr(x, "names") <- character(0)
 
   list2env(x, ...)
@@ -277,6 +267,25 @@ find.file.ci <- function(...) {
 # compatibility we need to add this function
 dirExists <- function(paths) {
   file.exists(paths) & file.info(paths)$isdir
+}
+
+# Removes empty directory (vectorized). This is needed because file.remove()
+# on Unix will remove empty directories, but on Windows, it will not. On
+# Windows, you would need to use unlink(recursive=TRUE), which is not very
+# safe. This function does it safely on Unix and Windows.
+dirRemove <- function(path) {
+  for (p in path) {
+    if (!dirExists(p)) {
+      stop("Cannot remove non-existent directory ", p, ".")
+    }
+    if (length(dir(p, all.files = TRUE, no.. = TRUE)) != 0) {
+      stop("Cannot remove non-empty directory ", p, ".")
+    }
+    result <- unlink(p, recursive = TRUE)
+    if (result == 1) {
+      stop("Error removing directory ", p, ".")
+    }
+  }
 }
 
 # Attempt to join a path and relative path, and turn the result into a
@@ -672,6 +681,9 @@ Callbacks <- R6Class(
       .callbacks <<- Map$new()
     },
     register = function(callback) {
+      if (!is.function(callback)) {
+        stop("callback must be a function")
+      }
       id <- as.character(.nextId)
       .nextId <<- .nextId - 1L
       .callbacks$set(id, callback)
@@ -1539,7 +1551,10 @@ writeUTF8 <- function(text, ...) {
   writeLines(text, ..., useBytes = TRUE)
 }
 
-URLdecode <- decodeURIComponent
+URLdecode <- function(value) {
+  decodeURIComponent(value)
+}
+
 URLencode <- function(value, reserved = FALSE) {
   value <- enc2utf8(value)
   if (reserved) encodeURIComponent(value) else encodeURI(value)
@@ -1585,3 +1600,143 @@ Mutable <- R6Class("Mutable",
     get = function() { private$value }
   )
 )
+
+# More convenient way of chaining together promises than then/catch/finally,
+# without the performance impact of %...>%.
+promise_chain <- function(promise, ..., catch = NULL, finally = NULL,
+  domain = NULL, replace = FALSE) {
+
+  do <- function() {
+    p <- Reduce(function(memo, func) {
+      promises::then(memo, func)
+    }, list(...), promise)
+
+    if (!is.null(catch)) {
+      p <- promises::catch(p, catch)
+    }
+
+    if (!is.null(finally)) {
+      p <- promises::finally(p, finally)
+    }
+
+    p
+  }
+
+  if (!is.null(domain)) {
+    promises::with_promise_domain(domain, do(), replace = replace)
+  } else {
+    do()
+  }
+}
+
+# Like promise_chain, but if `expr` returns a non-promise, then `...`, `catch`,
+# and `finally` are all executed synchronously
+hybrid_chain <- function(expr, ..., catch = NULL, finally = NULL,
+  domain = NULL, replace = FALSE) {
+
+  do <- function() {
+    runFinally <- TRUE
+    tryCatch(
+      {
+        captureStackTraces({
+          result <- withVisible(force(expr))
+          if (promises::is.promising(result$value)) {
+            # Purposefully NOT including domain (nor replace), as we're already in
+            # the domain at this point
+            p <- promise_chain(setVisible(result), ..., catch = catch, finally = finally)
+            runFinally <- FALSE
+            p
+          } else {
+            result <- Reduce(function(v, func) {
+              if (".visible" %in% names(formals(func))) {
+                withVisible(func(v$value, .visible = v$visible))
+              } else {
+                withVisible(func(v$value))
+              }
+            }, list(...), result)
+
+            setVisible(result)
+          }
+        })
+      },
+      error = function(e) {
+        if (!is.null(catch))
+          catch(e)
+        else
+          stop(e)
+      },
+      finally = if (runFinally && !is.null(finally)) finally()
+    )
+  }
+
+  if (!is.null(domain)) {
+    promises::with_promise_domain(domain, do(), replace = replace)
+  } else {
+    do()
+  }
+}
+
+# Returns `value` with either `invisible()` applied or not, depending on the
+# value of `visible`.
+#
+# If the `visible` is missing, then `value` should be a list as returned from
+# `withVisible()`, and that visibility will be applied.
+setVisible <- function(value, visible) {
+  if (missing(visible)) {
+    visible <- value$visible
+    value <- value$value
+  }
+
+  if (!visible) {
+    invisible(value)
+  } else {
+    (value)
+  }
+}
+
+createVarPromiseDomain <- function(env, name, value) {
+  force(env)
+  force(name)
+  force(value)
+
+  promises::new_promise_domain(
+    wrapOnFulfilled = function(onFulfilled) {
+      function(...) {
+        orig <- env[[name]]
+        env[[name]] <- value
+        on.exit(env[[name]] <- orig)
+
+        onFulfilled(...)
+      }
+    },
+    wrapOnRejected = function(onRejected) {
+      function(...) {
+        orig <- env[[name]]
+        env[[name]] <- value
+        on.exit(env[[name]] <- orig)
+
+        onRejected(...)
+      }
+    },
+    wrapSync = function(expr) {
+      orig <- env[[name]]
+      env[[name]] <- value
+      on.exit(env[[name]] <- orig)
+
+      force(expr)
+    }
+  )
+}
+
+getSliderType <- function(min, max, value) {
+  vals <- dropNulls(list(value, min, max))
+  type <- unique(lapply(vals, function(x) {
+    if      (inherits(x, "Date"))   "date"
+    else if (inherits(x, "POSIXt")) "datetime"
+    else                            "number"
+  }))
+  if (length(type) > 1) {
+    stop("Type mismatch for `min`, `max`, and `value`. Each must be Date, POSIXt, or number.")
+  }
+  type[[1]]
+}

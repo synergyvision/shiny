@@ -3,6 +3,18 @@ $.extend(selectInputBinding, {
   find: function(scope) {
     return $(scope).find('select');
   },
+  getType: function(el) {
+    var $el = $(el);
+    if (!$el.hasClass("symbol")) {
+      // default character type
+      return null;
+    }
+    if ($el.attr("multiple") === "multiple") {
+      return 'shiny.symbolList';
+    } else {
+      return 'shiny.symbol';
+    }
+  },
   getId: function(el) {
     return InputBinding.prototype.getId.call(this, el) || el.name;
   },
@@ -55,7 +67,7 @@ $.extend(selectInputBinding, {
     if (data.hasOwnProperty('url')) {
       selectize = this._selectize(el);
       selectize.clearOptions();
-      var thiz = this, loaded = false;
+      var loaded = false;
       selectize.settings.load = function(query, callback) {
         var settings = selectize.settings;
         $.ajax({
@@ -72,9 +84,19 @@ $.extend(selectInputBinding, {
             callback();
           },
           success: function(res) {
+            // res = [{label: '1', value: '1', group: '1'}, ...]
+            // success is called after options are added, but
+            // groups need to be added manually below
+            $.each(res, function(index, elem) {
+              selectize.addOptionGroup(elem.group, { group: elem.group });
+            });
             callback(res);
-            if (!loaded && data.hasOwnProperty('value'))
-              thiz.setValue(el, data.value);
+            if (!loaded && data.hasOwnProperty('value')) {
+              selectize.setValue(data.value);
+            } else if (settings.maxItems === 1) {
+              // first item selected by default only for single-select
+              selectize.setValue(res[0].value);
+            }
             loaded = true;
           }
         });
@@ -93,7 +115,13 @@ $.extend(selectInputBinding, {
     $(el).trigger('change');
   },
   subscribe: function(el, callback) {
-    $(el).on('change.selectInputBinding', function(event) {
+    $(el).on('change.selectInputBinding', event => {
+      // https://github.com/rstudio/shiny/issues/2162
+      // Prevent spurious events that are gonna be squelched in
+      // a second anyway by the onItemRemove down below
+      if (el.nonempty && this.getValue(el) === "") {
+        return;
+      }
       callback();
     });
   },
@@ -111,10 +139,14 @@ $.extend(selectInputBinding, {
     var options = $.extend({
       labelField: 'label',
       valueField: 'value',
-      searchField: ['label']
+      searchField: ['label'],
+      optgroupField: 'group',
+      optgroupLabelField: 'group',
+      optgroupValueField: 'group'
     }, JSON.parse(config.html()));
     // selectize created from selectInput()
     if (typeof(config.data('nonempty')) !== 'undefined') {
+      el.nonempty = true;
       options = $.extend(options, {
         onItemRemove: function(value) {
           if (this.getValue() === "")
@@ -128,6 +160,8 @@ $.extend(selectInputBinding, {
             this.setValue($("select#" + $escape(el.id)).val());
         }
       });
+    } else {
+      el.nonempty = false;
     }
     // options that should be eval()ed
     if (config.data('eval') instanceof Array)
